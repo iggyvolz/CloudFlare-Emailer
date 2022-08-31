@@ -1,0 +1,6 @@
+name = "emailer"
+main = "src/index.ts"
+compatibility_date = "2022-08-28"
+kv_namespaces = [
+    { binding = "kv", id = "5a1c657737d0428dac6730e36238bcc3", preview_id="2d9b2f1a202247f1a356ef13a732926d" }
+]
