@@ -1,34 +1,26 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `wrangler dev src/index.ts` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `wrangler publish src/index.ts --name my-worker` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
 import EmailMessage from "./email";
 import jwt from "./jwt";
-
+import {Request as IRequest, Router} from "itty-router";
+type IncomingRequest = Request&IRequest;
 export interface Env {
-	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
-	// MY_KV_NAMESPACE: KVNamespace;
-	//
-	// Example binding to Durable Object. Learn more at https://developers.cloudflare.com/workers/runtime-apis/durable-objects/
-	// MY_DURABLE_OBJECT: DurableObjectNamespace;
-	//
-	// Example binding to R2. Learn more at https://developers.cloudflare.com/workers/runtime-apis/r2/
-	// MY_BUCKET: R2Bucket;
 	kv: KVNamespace;
 	CLOUDMAILIN_KEY: string;
 	CLOUDFLARE_ORGANIZATION: string;
 	DKIM_PRIVATE_KEY: string;
 }
 
+// now let's create a router (note the lack of "new")
+const router = Router()
+export default {
+	fetch: router.handle
+}
 
-async function cloudmailin(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+router.post("/incoming", async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
+	if(basicAuthentication(request) !== "cloudmailin:" + env.CLOUDMAILIN_KEY) {
+		return new Response("", {status: 401});
+	}
 	const body: EmailMessage = await request.json();
-	const message_id: string | undefined | string[] = body.headers.message_id;
+	const message_id: unknown = body.headers.message_id;
 	if(typeof message_id != "string") {
 		return new Response("", {
 			status: 400,
@@ -40,18 +32,42 @@ async function cloudmailin(request: Request, env: Env, ctx: ExecutionContext): P
 		status: 200,
 		headers: STANDARD_HEADERS,
 	});
-}
+});
 
-async function incoming(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-	const basicAuth = basicAuthentication(request);
-	if(basicAuth === "cloudmailin:" + env.CLOUDMAILIN_KEY) {
-		return cloudmailin(request, env, ctx);
+router.post("/outgoing", async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
+	const token = basicAuthentication(request);
+	if(typeof token !== "string") {
+		throw new Error("No payload provided");
 	}
-	return new Response("", {
-		status: 401,
-		headers: STANDARD_HEADERS,
-	});
-}
+	const host = jwt(token, env.CLOUDFLARE_ORGANIZATION);
+});
+
+// async function cloudmailin(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// 	const body: EmailMessage = await request.json();
+// 	const message_id: unknown = body.headers.message_id;
+// 	if(typeof message_id != "string") {
+// 		return new Response("", {
+// 			status: 400,
+// 			headers: STANDARD_HEADERS,
+// 		});
+// 	}
+// 	await env.kv.put(message_id, JSON.stringify(body));
+// 	return new Response("", {
+// 		status: 200,
+// 		headers: STANDARD_HEADERS,
+// 	});
+// }
+//
+// async function incoming(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// 	const basicAuth = basicAuthentication(request);
+// 	if(basicAuth === "cloudmailin:" + env.CLOUDMAILIN_KEY) {
+// 		return cloudmailin(request, env, ctx);
+// 	}
+// 	return new Response("", {
+// 		status: 401,
+// 		headers: STANDARD_HEADERS,
+// 	});
+// }
 async function outgoing(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	const outgoingEmail: {"to":string,"toName":string,"subject":string,"body":string} = await request.json();
 	const body = JSON.stringify({
@@ -90,7 +106,7 @@ async function outgoing(request: Request, env: Env, ctx: ExecutionContext): Prom
 	});
 }
 
-async function onemail(request: Request, env: Env, ctx: ExecutionContext, matches: RegExpExecArray): Promise<Response> {
+async function onemail(request: Request, env: Env, ctx: ExecutionContext, account: string, matches: RegExpExecArray): Promise<Response> {
 	let email: string;
 	try {
 		email = atob(matches[1]);
@@ -136,14 +152,20 @@ async function listmail(request: Request, env: Env, ctx: ExecutionContext, match
 
 }
 
-function cloudmailinValidation(env: Env, token: null|string): boolean
+async function cloudmailinValidation(env: Env, token: null|string): Promise<string>
 {
-	return token === "cloudmailin:" + env.CLOUDMAILIN_KEY
+	if(token === "cloudmailin:" + env.CLOUDMAILIN_KEY) {
+		return "";
+	} else {
+		throw new Error("Invalid key");
+	}
 }
 
-async function cfValidation(env: Env, token: null|string): Promise<boolean>
+async function cfValidation(env: Env, token: null|string): Promise<string>
 {
-	if(typeof token !== "string") return false;
+	if(typeof token !== "string") {
+		throw new Error("No payload provided");
+	}
 	return jwt(token, env.CLOUDFLARE_ORGANIZATION);
 }
 
@@ -153,8 +175,8 @@ const STANDARD_HEADERS = {
 	"access-control-allow-origin": "*",
 };
 
-export default {
-	async fetch(
+var x= {
+	async _fetch(
 		request: Request,
 		env: Env,
 		ctx: ExecutionContext
@@ -167,7 +189,7 @@ export default {
 		try {
 			const {pathname} = new URL(request.url);
 
-			const routes: { route: RegExp, validation: (env: Env, token: null|string) => (Promise<boolean>|boolean), action: (request: Request, env: Env, ctx: ExecutionContext, matches: RegExpExecArray) => Promise<Response> }[] = [
+			const routes: { route: RegExp, validation: (env: Env, token: null|string) => (Promise<string>|string), action: (request: Request, env: Env, ctx: ExecutionContext, email: string, matches: RegExpExecArray) => Promise<Response> }[] = [
 				{route: /^\/incoming$/, validation: cloudmailinValidation, action: incoming},
 				{route: /^\/outgoing$/, validation: cfValidation,action: outgoing},
 				{route: /^\/mail\/([A-Za-z0-9=]+)$/, validation: cfValidation,action: onemail},
